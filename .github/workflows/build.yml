@@ -1,4 +1,4 @@
-AAAname: Build ItemChat
+name: Build ItemChat
 
 on:
   push:
