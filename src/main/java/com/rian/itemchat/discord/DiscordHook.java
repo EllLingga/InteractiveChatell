@@ -65,11 +65,7 @@ public class DiscordHook {
             if (action == null) return;
 
             if (images != null && !images.isEmpty()) {
-                // DiscordSRV shades/relocates JDA (e.g. net.dv8tion.jda -> github.scarsz.discordsrv.dependencies.jda)
-                // to avoid classpath conflicts, so we can't hardcode "net.dv8tion.jda...". Derive the real,
-                // possibly-relocated JDA base package from the channel object's own class name instead.
-                String jdaBasePackage = detectJdaBasePackage(channel.getClass());
-                action = attachImages(plugin, channel.getClass().getClassLoader(), jdaBasePackage, action, images);
+                action = attachImages(plugin, channel.getClass().getClassLoader(), action, images);
             }
 
             Method queueMethod = action.getClass().getMethod("queue");
@@ -98,13 +94,33 @@ public class DiscordHook {
     }
 
     /**
-     * Attaches PNG files to a MessageCreateAction via reflection (JDA's FileUpload API).
-     * Always returns a non-null action: if attaching fails for any reason, the ORIGINAL
-     * action is returned (so the text message still sends) but the failure is logged so
-     * it's actually visible instead of silently dropping the images.
+     * Attaches PNG files to the Discord message action, trying BOTH JDA API shapes since
+     * different JDA versions (and DiscordSRV's bundled version specifically) differ here:
+     *  - JDA 5+: FileUpload.fromData(...) + action.addFiles(FileUpload...)
+     *  - JDA 4.x (what DiscordSRV currently bundles): action.addFile(File, String) directly,
+     *    called once per file, each call returning the (mutated) action to chain off of.
+     * Always returns a non-null action: if BOTH attempts fail, the ORIGINAL action is
+     * returned (so the text message still sends), and the failure is logged so it's
+     * actually visible instead of silently dropping the images.
      */
-    private static Object attachImages(Plugin plugin, ClassLoader jdaClassLoader, String jdaBasePackage,
-                                        Object action, List<File> images) {
+    private static Object attachImages(Plugin plugin, ClassLoader jdaClassLoader, Object action, List<File> images) {
+        String jdaBasePackage = detectJdaBasePackage(action.getClass());
+
+        Object viaFileUpload = tryAttachViaFileUpload(jdaClassLoader, jdaBasePackage, action, images);
+        if (viaFileUpload != null) return viaFileUpload;
+
+        Object viaAddFile = tryAttachViaLegacyAddFile(action, images);
+        if (viaAddFile != null) return viaAddFile;
+
+        plugin.getLogger().warning("Could not attach images to the Discord message - tried both the "
+                + "JDA5 FileUpload API and the legacy JDA4 addFile(File, String) API and neither worked "
+                + "against " + action.getClass() + ". Only text will be sent to Discord.");
+        return action;
+    }
+
+    /** JDA 5+ style: FileUpload.fromData(File, String) + action.addFiles(FileUpload...). Returns null on any failure. */
+    private static Object tryAttachViaFileUpload(ClassLoader jdaClassLoader, String jdaBasePackage,
+                                                  Object action, List<File> images) {
         try {
             Class<?> fileUploadClass = Class.forName(
                     jdaBasePackage + ".api.utils.FileUpload", true, jdaClassLoader);
@@ -117,30 +133,37 @@ public class DiscordHook {
                 Array.set(array, i, fileUpload);
             }
 
-            // Look for addFiles(FileUpload...) on the PUBLIC interface chain (MessageCreateRequest),
-            // not on the concrete (often non-public) implementation class - invoking a Method whose
-            // declaring class isn't public throws IllegalAccessException even though the method
-            // itself is public. Also force-open access just in case.
             Method addFilesMethod = findPublicInterfaceMethod(action.getClass(), "addFiles", array.getClass());
             if (addFilesMethod == null) {
                 addFilesMethod = findMethod(action.getClass(), "addFiles", array.getClass());
             }
-            if (addFilesMethod == null) {
-                plugin.getLogger().warning("Could not find addFiles(FileUpload...) on "
-                        + action.getClass() + " - images will NOT be sent to Discord, only text.");
-                return action;
-            }
+            if (addFilesMethod == null) return null;
+
             addFilesMethod.setAccessible(true);
             Object result = addFilesMethod.invoke(action, new Object[]{array});
             return result != null ? result : action;
-        } catch (ClassNotFoundException e) {
-            plugin.getLogger().warning("JDA's FileUpload class not found (looked for "
-                    + jdaBasePackage + ".api.utils.FileUpload) - images will NOT be sent to Discord: " + e);
-            return action;
         } catch (Throwable t) {
-            plugin.getLogger().warning("Failed to attach images to Discord message "
-                    + "(falling back to text-only): " + t);
-            return action;
+            return null; // this API shape isn't available - caller will try the legacy one
+        }
+    }
+
+    /** JDA 4.x style (what DiscordSRV currently bundles): action.addFile(File, String) once per image. Returns null on any failure. */
+    private static Object tryAttachViaLegacyAddFile(Object action, List<File> images) {
+        try {
+            Object current = action;
+            for (File file : images) {
+                Method addFileMethod = findPublicInterfaceMethod(current.getClass(), "addFile", File.class, String.class);
+                if (addFileMethod == null) {
+                    addFileMethod = findMethod(current.getClass(), "addFile", File.class, String.class);
+                }
+                if (addFileMethod == null) return null; // this API shape isn't available either
+                addFileMethod.setAccessible(true);
+                Object result = addFileMethod.invoke(current, file, file.getName());
+                if (result != null) current = result;
+            }
+            return current;
+        } catch (Throwable t) {
+            return null;
         }
     }
 
@@ -149,12 +172,12 @@ public class DiscordHook {
      * interface in the hierarchy that declares it, so Method#invoke doesn't choke on a
      * package-private implementation class (common with JDA's `internal.*` impl classes).
      */
-    private static Method findPublicInterfaceMethod(Class<?> startClass, String name, Class<?> paramType) {
+    private static Method findPublicInterfaceMethod(Class<?> startClass, String name, Class<?>... paramTypes) {
         Class<?> current = startClass;
         while (current != null) {
             for (Class<?> iface : getAllInterfaces(current)) {
                 if (!java.lang.reflect.Modifier.isPublic(iface.getModifiers())) continue;
-                Method m = tryGetMethod(iface, name, paramType);
+                Method m = tryGetMethod(iface, name, paramTypes);
                 if (m != null) return m;
             }
             current = current.getSuperclass();
@@ -171,13 +194,13 @@ public class DiscordHook {
         return result;
     }
 
-    private static Method findMethod(Class<?> startClass, String name, Class<?> paramType) {
+    private static Method findMethod(Class<?> startClass, String name, Class<?>... paramTypes) {
         Class<?> current = startClass;
         while (current != null) {
-            Method m = tryGetMethod(current, name, paramType);
+            Method m = tryGetMethod(current, name, paramTypes);
             if (m != null) return m;
             for (Class<?> iface : current.getInterfaces()) {
-                m = tryGetMethod(iface, name, paramType);
+                m = tryGetMethod(iface, name, paramTypes);
                 if (m != null) return m;
             }
             current = current.getSuperclass();
@@ -185,9 +208,9 @@ public class DiscordHook {
         return null;
     }
 
-    private static Method tryGetMethod(Class<?> clazz, String name, Class<?> paramType) {
+    private static Method tryGetMethod(Class<?> clazz, String name, Class<?>... paramTypes) {
         try {
-            return clazz.getMethod(name, paramType);
+            return clazz.getMethod(name, paramTypes);
         } catch (NoSuchMethodException e) {
             return null;
         }
