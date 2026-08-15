@@ -22,15 +22,6 @@
             <id>papermc</id>
             <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
-        <!-- DiscordSRV -->
-        <repository>
-            <id>jitpack.io</id>
-            <url>https://jitpack.io</url>
-        </repository>
-        <repository>
-            <id>sonatype</id>
-            <url>https://oss.sonatype.org/content/groups/public/</url>
-        </repository>
     </repositories>
 
     <dependencies>
@@ -43,20 +34,9 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- DiscordSRV: only needed at compile time, the real plugin jar
-     the user already has installed on their server is used at runtime -->
-        <dependency>
-            <groupId>com.github.DiscordSRV</groupId>
-            <artifactId>DiscordSRV</artifactId>
-            <version>master</version>
-            <scope>provided</scope>
-            <exclusions>
-                <exclusion>
-                    <groupId>*</groupId>
-                    <artifactId>*</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
+        <!-- DiscordSRV is NOT a compile dependency anymore: we talk to it purely
+             via reflection at runtime, so we don't need its jar (or JDA's) to build.
+             This avoids relying on Jitpack being able to build DiscordSRV's multi-module repo. -->
     </dependencies>
 
     <build>
