@@ -28,12 +28,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * not a full 3D isometric block render - that would need a real rendering
  * engine which isn't practical inside a lightweight plugin.
  *
- * The mirror is organized as one git branch per Minecraft version. Rather than
- * hardcoding a version (which would silently go stale on every future update),
- * this auto-detects the server's own Minecraft version and tries that branch
- * first, falling back to the mirror's "master" branch (kept close to the
- * newest release) if the exact version doesn't have a branch there - e.g.
- * because it's newer than anything the mirror has tagged yet.
+ * The mirror is organized as one git branch per Minecraft version (there is no
+ * "master"/rolling branch). Rather than hardcoding a version (which would
+ * silently go stale on every future update), this auto-detects the server's
+ * own Minecraft version and tries that branch first, then progressively
+ * shorter version prefixes as a best-effort fallback if the exact patch
+ * version doesn't have a branch there yet - e.g. because it's newer than
+ * anything the mirror has tagged.
  */
 public class TextureCache {
 
@@ -53,9 +54,16 @@ public class TextureCache {
             cacheDir.mkdirs();
         }
         this.candidateRefs = buildCandidateRefs(plugin);
-        plugin.getLogger().info("ItemChat: fetching item icons for detected server version "
-                + candidateRefs.get(0) + " (falling back to the mirror's 'master' branch for "
-                + "anything not found there, e.g. items added after the mirror's last update).");
+        if (candidateRefs.isEmpty()) {
+            plugin.getLogger().warning("ItemChat: could not auto-detect the server's Minecraft "
+                    + "version; item icon downloads will use the placeholder icon.");
+        } else {
+            plugin.getLogger().info("ItemChat: fetching item icons for detected server version "
+                    + candidateRefs.get(0) + (candidateRefs.size() > 1
+                    ? " (falling back to " + String.join(", ", candidateRefs.subList(1, candidateRefs.size()))
+                        + " if a texture isn't found there, e.g. items added after the mirror's last update)."
+                    : "."));
+        }
     }
 
     /** Kept for anyone constructing this directly with an explicit override (e.g. tests). */
@@ -68,33 +76,74 @@ public class TextureCache {
         List<String> refs = new ArrayList<>();
         if (forcedMcVersion != null && !forcedMcVersion.isEmpty()) {
             refs.add(forcedMcVersion);
-        }
-        if (!refs.contains("master")) {
-            refs.add("master");
+            // Same best-effort shorter-prefix fallback as the auto-detected path, since
+            // the mirror has no generic "master"/rolling branch to fall back to.
+            String[] parts = forcedMcVersion.split("\\.");
+            for (int len = parts.length - 1; len >= 2; len--) {
+                String shorter = String.join(".", java.util.Arrays.copyOfRange(parts, 0, len));
+                if (!refs.contains(shorter)) {
+                    refs.add(shorter);
+                }
+            }
         }
         this.candidateRefs = refs;
     }
 
     /**
-     * Figures out the running server's Minecraft version from Bukkit itself (e.g.
-     * getBukkitVersion() = "1.20.4-R0.1-SNAPSHOT" -> "1.20.4"), so this always tracks
-     * whatever version the server actually is instead of a value baked in at build time.
+     * Figures out the running server's Minecraft version, so this always tracks whatever
+     * version the server actually is instead of a value baked in at build time.
+     *
+     * getBukkitVersion() is NOT reliable for this: on some server implementations/versions
+     * it isn't a clean "1.20.4-R0.1-SNAPSHOT" string, and blindly cutting at the first '-'
+     * can leave trailing build metadata attached (e.g. "26.1.2.build.74" instead of
+     * "26.1.2"), which will never match one of the mirror's version-named branches.
+     * getVersion() (e.g. "git-Paper-74 (MC: 26.1.2)") reliably contains the real vanilla
+     * Minecraft version in parentheses, so that's parsed first and preferred.
+     *
+     * Also note: the mirror (InventivetalentDev/minecraft-assets) has no "master" branch -
+     * it only has one branch per Minecraft version. So there is no safe generic fallback
+     * ref; if the exact version branch doesn't exist (e.g. a very new release the mirror
+     * hasn't tagged yet), we progressively try shorter/older version prefixes as a
+     * best-effort fallback instead of a branch name that can never exist.
      */
     private static List<String> buildCandidateRefs(Plugin plugin) {
         List<String> refs = new ArrayList<>();
+        String detected = null;
         try {
-            String bukkitVersion = plugin.getServer().getBukkitVersion(); // e.g. "1.20.4-R0.1-SNAPSHOT"
-            int dashIdx = bukkitVersion.indexOf('-');
-            String detected = dashIdx > 0 ? bukkitVersion.substring(0, dashIdx) : bukkitVersion;
-            if (!detected.isEmpty()) {
-                refs.add(detected);
+            // Prefer parsing "(MC: X.Y.Z)" out of getVersion() - this is the actual
+            // vanilla Minecraft version and matches the mirror's branch naming.
+            String fullVersion = plugin.getServer().getVersion(); // e.g. "git-Paper-74 (MC: 26.1.2)"
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("MC:\\s*([0-9]+(?:\\.[0-9]+)*)").matcher(fullVersion);
+            if (m.find()) {
+                detected = m.group(1);
+            } else {
+                // Fallback: extract a leading version-number pattern from getBukkitVersion(),
+                // ignoring anything after it (build numbers, hashes, suffixes, etc.)
+                String bukkitVersion = plugin.getServer().getBukkitVersion();
+                java.util.regex.Matcher m2 = java.util.regex.Pattern
+                        .compile("^([0-9]+(?:\\.[0-9]+)*)").matcher(bukkitVersion);
+                if (m2.find()) {
+                    detected = m2.group(1);
+                }
             }
         } catch (Exception e) {
             plugin.getLogger().warning("Could not auto-detect the server's Minecraft version for "
-                    + "item icon downloads, falling back to the mirror's 'master' branch: " + e);
+                    + "item icon downloads: " + e);
         }
-        if (!refs.contains("master")) {
-            refs.add("master"); // mirror's rolling branch, usually close to the newest release
+
+        if (detected != null && !detected.isEmpty()) {
+            refs.add(detected);
+            // Best-effort fallback: if the mirror doesn't have a branch for this exact
+            // patch version yet, progressively try shorter prefixes (e.g. "26.1.2" ->
+            // "26.1"), since the mirror is more likely to have the minor-version branch.
+            String[] parts = detected.split("\\.");
+            for (int len = parts.length - 1; len >= 2; len--) {
+                String shorter = String.join(".", java.util.Arrays.copyOfRange(parts, 0, len));
+                if (!refs.contains(shorter)) {
+                    refs.add(shorter);
+                }
+            }
         }
         return refs;
     }
@@ -133,7 +182,7 @@ public class TextureCache {
         return image;
     }
 
-    /** Tries each candidate mirror branch (detected server version, then "master") until one has the texture. */
+    /** Tries each candidate mirror branch (detected version, then shorter version prefixes) until one has the texture. */
     private BufferedImage download(String category, String name, File saveTo, List<String> diagnostics) {
         for (String ref : candidateRefs) {
             BufferedImage image = downloadFromRef(ref, category, name, saveTo, diagnostics);
