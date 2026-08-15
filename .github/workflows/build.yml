@@ -1,4 +1,4 @@
-name: Build ItemChat
+AAAname: Build ItemChat
 
 on:
   push:
@@ -17,8 +17,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Build with Maven
-        run: mvn -B package --file pom.xml
+      - name: Build with Maven (auto-retry on corrupted download)
+        run: |
+          mvn -B -U package --file pom.xml || (
+            echo "Build failed, likely due to a corrupted downloaded dependency. Clearing local repo and retrying..."
+            rm -rf ~/.m2/repository
+            mvn -B -U package --file pom.xml
+          )
 
       - name: Upload built jar
         uses: actions/upload-artifact@v4
