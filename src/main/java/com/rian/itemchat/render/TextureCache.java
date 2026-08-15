@@ -108,22 +108,25 @@ public class TextureCache {
         String name = material.name().toLowerCase(Locale.ROOT);
         File file = new File(cacheDir, name + ".png");
         BufferedImage image = null;
+        List<String> diagnostics = new ArrayList<>();
 
         try {
             if (file.exists()) {
                 image = ImageIO.read(file);
             }
             if (image == null) {
-                image = download("item", name, file);
+                image = download("item", name, file, diagnostics);
             }
             if (image == null) {
-                image = download("block", name, file);
+                image = download("block", name, file, diagnostics);
             }
         } catch (Exception e) {
             plugin.getLogger().warning("Failed to load texture for " + name + ": " + e.getMessage());
         }
 
         if (image == null) {
+            plugin.getLogger().warning("Could not fetch a texture for " + name + " from any mirror branch, "
+                    + "using a placeholder icon instead. Attempts: " + String.join(" | ", diagnostics));
             image = getMissingTexture();
         }
         memoryCache.put(material, image);
@@ -131,9 +134,9 @@ public class TextureCache {
     }
 
     /** Tries each candidate mirror branch (detected server version, then "master") until one has the texture. */
-    private BufferedImage download(String category, String name, File saveTo) {
+    private BufferedImage download(String category, String name, File saveTo, List<String> diagnostics) {
         for (String ref : candidateRefs) {
-            BufferedImage image = downloadFromRef(ref, category, name, saveTo);
+            BufferedImage image = downloadFromRef(ref, category, name, saveTo, diagnostics);
             if (image != null) {
                 return image;
             }
@@ -141,14 +144,17 @@ public class TextureCache {
         return null;
     }
 
-    private BufferedImage downloadFromRef(String ref, String category, String name, File saveTo) {
+    private BufferedImage downloadFromRef(String ref, String category, String name, File saveTo, List<String> diagnostics) {
+        String label = ref + "/" + category + "/" + name;
         try {
             URL url = new URL(String.format(ASSET_BASE, ref, category, name));
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setConnectTimeout(4000);
             conn.setReadTimeout(4000);
             conn.setRequestProperty("User-Agent", "ItemChat-Plugin");
-            if (conn.getResponseCode() != 200) {
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                diagnostics.add(label + " -> HTTP " + code);
                 return null;
             }
             try (InputStream in = conn.getInputStream()) {
@@ -157,6 +163,7 @@ public class TextureCache {
                 return ImageIO.read(new ByteArrayInputStream(bytes));
             }
         } catch (Exception e) {
+            diagnostics.add(label + " -> " + e.getClass().getSimpleName() + ": " + e.getMessage());
             return null;
         }
     }
