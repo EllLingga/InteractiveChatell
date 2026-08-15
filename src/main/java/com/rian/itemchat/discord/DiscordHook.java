@@ -65,8 +65,7 @@ public class DiscordHook {
             if (action == null) return;
 
             if (images != null && !images.isEmpty()) {
-                action = attachImages(action, images);
-                if (action == null) return; // attaching failed, error already logged
+                action = attachImages(plugin, action, images);
             }
 
             Method queueMethod = action.getClass().getMethod("queue");
@@ -78,8 +77,13 @@ public class DiscordHook {
         }
     }
 
-    /** Attaches PNG files to a MessageCreateAction via reflection (JDA's FileUpload API). */
-    private static Object attachImages(Object action, List<File> images) {
+    /**
+     * Attaches PNG files to a MessageCreateAction via reflection (JDA's FileUpload API).
+     * Always returns a non-null action: if attaching fails for any reason, the ORIGINAL
+     * action is returned (so the text message still sends) but the failure is logged so
+     * it's actually visible instead of silently dropping the images.
+     */
+    private static Object attachImages(Plugin plugin, Object action, List<File> images) {
         try {
             Class<?> fileUploadClass = Class.forName("net.dv8tion.jda.api.utils.FileUpload");
             Method fromDataMethod = fileUploadClass.getMethod("fromData", File.class, String.class);
@@ -91,14 +95,58 @@ public class DiscordHook {
                 Array.set(array, i, fileUpload);
             }
 
-            Method addFilesMethod = findMethod(action.getClass(), "addFiles", array.getClass());
-            if (addFilesMethod == null) return action; // no attachment support found, just send text
-            return addFilesMethod.invoke(action, new Object[]{array});
+            // Look for addFiles(FileUpload...) on the PUBLIC interface chain (MessageCreateRequest),
+            // not on the concrete (often non-public) implementation class - invoking a Method whose
+            // declaring class isn't public throws IllegalAccessException even though the method
+            // itself is public. Also force-open access just in case.
+            Method addFilesMethod = findPublicInterfaceMethod(action.getClass(), "addFiles", array.getClass());
+            if (addFilesMethod == null) {
+                addFilesMethod = findMethod(action.getClass(), "addFiles", array.getClass());
+            }
+            if (addFilesMethod == null) {
+                plugin.getLogger().warning("Could not find addFiles(FileUpload...) on "
+                        + action.getClass() + " - images will NOT be sent to Discord, only text.");
+                return action;
+            }
+            addFilesMethod.setAccessible(true);
+            Object result = addFilesMethod.invoke(action, new Object[]{array});
+            return result != null ? result : action;
         } catch (ClassNotFoundException e) {
-            return action; // JDA not available for some reason, fall back to text-only
+            plugin.getLogger().warning("JDA's FileUpload class not found on classpath - "
+                    + "images will NOT be sent to Discord: " + e);
+            return action;
         } catch (Throwable t) {
+            plugin.getLogger().warning("Failed to attach images to Discord message "
+                    + "(falling back to text-only): " + t);
             return action;
         }
+    }
+
+    /**
+     * Same lookup as findMethod, but returns the Method object taken from the first PUBLIC
+     * interface in the hierarchy that declares it, so Method#invoke doesn't choke on a
+     * package-private implementation class (common with JDA's `internal.*` impl classes).
+     */
+    private static Method findPublicInterfaceMethod(Class<?> startClass, String name, Class<?> paramType) {
+        Class<?> current = startClass;
+        while (current != null) {
+            for (Class<?> iface : getAllInterfaces(current)) {
+                if (!java.lang.reflect.Modifier.isPublic(iface.getModifiers())) continue;
+                Method m = tryGetMethod(iface, name, paramType);
+                if (m != null) return m;
+            }
+            current = current.getSuperclass();
+        }
+        return null;
+    }
+
+    private static List<Class<?>> getAllInterfaces(Class<?> clazz) {
+        List<Class<?>> result = new java.util.ArrayList<>();
+        for (Class<?> iface : clazz.getInterfaces()) {
+            result.add(iface);
+            result.addAll(getAllInterfaces(iface));
+        }
+        return result;
     }
 
     private static Method findMethod(Class<?> startClass, String name, Class<?> paramType) {
