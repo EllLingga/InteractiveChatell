@@ -3,10 +3,14 @@ package com.rian.itemchat.discord;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
+import java.io.File;
+import java.lang.reflect.Array;
 import java.lang.reflect.Method;
+import java.util.List;
 
 /**
- * Bridges chat-preview messages ([i]/[item]/[inv]/[pos]) to DiscordSRV's main text channel.
+ * Bridges chat-preview messages ([i]/[item]/[inv]/[pos]) to DiscordSRV's main text channel,
+ * including image attachments (item icon / inventory grid screenshot).
  *
  * This talks to the ALREADY installed & configured DiscordSRV plugin (bot token, channel IDs,
  * etc. all set up by the user) purely through Java reflection. That means this plugin does not
@@ -31,21 +35,19 @@ public class DiscordHook {
 
     /**
      * Called by ChatTagListener whenever a message containing [i]/[item]/[inv]/[pos]
-     * was sent in-game. Sends a matching plain-text message to Discord.
+     * was sent in-game. Sends a matching message (with image attachments, if any) to Discord.
      */
-    public static void relayIfPresent(Plugin plugin, Player player, String plainMessage, String originalMessage) {
+    public static void relayIfPresent(Plugin plugin, Player player, String plainMessage, List<File> images) {
         if (!plugin.getServer().getPluginManager().isPluginEnabled("DiscordSRV")) {
             return;
         }
         try {
             Class<?> discordSrvClass = Class.forName("github.scarsz.discordsrv.DiscordSRV");
 
-            // DiscordSRV.getPlugin()
             Method getPluginMethod = discordSrvClass.getMethod("getPlugin");
             Object discordSrvInstance = getPluginMethod.invoke(null);
             if (discordSrvInstance == null) return;
 
-            // discordSrvInstance.getMainTextChannel()
             Method getMainTextChannelMethod = discordSrvClass.getMethod("getMainTextChannel");
             Object channel = getMainTextChannelMethod.invoke(discordSrvInstance);
             if (channel == null) {
@@ -54,8 +56,7 @@ public class DiscordHook {
 
             String formatted = "**" + player.getName() + "** " + plainMessage;
 
-            // channel.sendMessage(CharSequence) -> MessageCreateAction
-            Method sendMessageMethod = findSendMessageMethod(channel.getClass());
+            Method sendMessageMethod = findMethod(channel.getClass(), "sendMessage", CharSequence.class);
             if (sendMessageMethod == null) {
                 plugin.getLogger().warning("Could not find sendMessage(CharSequence) on DiscordSRV's channel object.");
                 return;
@@ -63,7 +64,11 @@ public class DiscordHook {
             Object action = sendMessageMethod.invoke(channel, formatted);
             if (action == null) return;
 
-            // action.queue() - fires it off asynchronously, we don't need the result
+            if (images != null && !images.isEmpty()) {
+                action = attachImages(action, images);
+                if (action == null) return; // attaching failed, error already logged
+            }
+
             Method queueMethod = action.getClass().getMethod("queue");
             queueMethod.invoke(action);
         } catch (ClassNotFoundException e) {
@@ -73,14 +78,36 @@ public class DiscordHook {
         }
     }
 
-    private static Method findSendMessageMethod(Class<?> channelClass) {
-        // Walk the class + all interfaces looking for sendMessage(CharSequence)
-        Class<?> current = channelClass;
+    /** Attaches PNG files to a MessageCreateAction via reflection (JDA's FileUpload API). */
+    private static Object attachImages(Object action, List<File> images) {
+        try {
+            Class<?> fileUploadClass = Class.forName("net.dv8tion.jda.api.utils.FileUpload");
+            Method fromDataMethod = fileUploadClass.getMethod("fromData", File.class, String.class);
+
+            Object array = Array.newInstance(fileUploadClass, images.size());
+            for (int i = 0; i < images.size(); i++) {
+                File file = images.get(i);
+                Object fileUpload = fromDataMethod.invoke(null, file, file.getName());
+                Array.set(array, i, fileUpload);
+            }
+
+            Method addFilesMethod = findMethod(action.getClass(), "addFiles", array.getClass());
+            if (addFilesMethod == null) return action; // no attachment support found, just send text
+            return addFilesMethod.invoke(action, new Object[]{array});
+        } catch (ClassNotFoundException e) {
+            return action; // JDA not available for some reason, fall back to text-only
+        } catch (Throwable t) {
+            return action;
+        }
+    }
+
+    private static Method findMethod(Class<?> startClass, String name, Class<?> paramType) {
+        Class<?> current = startClass;
         while (current != null) {
-            Method m = tryGetMethod(current);
+            Method m = tryGetMethod(current, name, paramType);
             if (m != null) return m;
             for (Class<?> iface : current.getInterfaces()) {
-                m = tryGetMethod(iface);
+                m = tryGetMethod(iface, name, paramType);
                 if (m != null) return m;
             }
             current = current.getSuperclass();
@@ -88,9 +115,9 @@ public class DiscordHook {
         return null;
     }
 
-    private static Method tryGetMethod(Class<?> clazz) {
+    private static Method tryGetMethod(Class<?> clazz, String name, Class<?> paramType) {
         try {
-            return clazz.getMethod("sendMessage", CharSequence.class);
+            return clazz.getMethod(name, paramType);
         } catch (NoSuchMethodException e) {
             return null;
         }
