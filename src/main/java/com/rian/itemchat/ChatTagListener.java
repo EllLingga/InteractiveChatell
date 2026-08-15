@@ -45,7 +45,7 @@ public class ChatTagListener implements Listener {
     public ChatTagListener(Plugin plugin, PreviewStore store) {
         this.plugin = plugin;
         this.store = store;
-        TextureCache textureCache = new TextureCache(plugin, "1.20.4");
+        TextureCache textureCache = new TextureCache(plugin);
         this.itemImageRenderer = new ItemImageRenderer(textureCache);
         this.inventoryImageRenderer = new InventoryImageRenderer(textureCache);
         this.imageCacheDir = new File(plugin.getDataFolder(), "previews");
