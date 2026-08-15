@@ -65,11 +65,11 @@ public class DiscordHook {
             if (action == null) return;
 
             if (images != null && !images.isEmpty()) {
-                // Use the channel object's OWN classloader to resolve JDA classes, not
-                // ItemChat's classloader - DiscordSRV loads JDA via its own library loader,
-                // so JDA classes are only visible through that classloader, not through
-                // Bukkit's normal inter-plugin class lookup.
-                action = attachImages(plugin, channel.getClass().getClassLoader(), action, images);
+                // DiscordSRV shades/relocates JDA (e.g. net.dv8tion.jda -> github.scarsz.discordsrv.dependencies.jda)
+                // to avoid classpath conflicts, so we can't hardcode "net.dv8tion.jda...". Derive the real,
+                // possibly-relocated JDA base package from the channel object's own class name instead.
+                String jdaBasePackage = detectJdaBasePackage(channel.getClass());
+                action = attachImages(plugin, channel.getClass().getClassLoader(), jdaBasePackage, action, images);
             }
 
             Method queueMethod = action.getClass().getMethod("queue");
@@ -82,15 +82,32 @@ public class DiscordHook {
     }
 
     /**
+     * Figures out the real (possibly relocated/shaded) base package of JDA at runtime by
+     * inspecting the fully-qualified class name of a known JDA object (e.g. the TextChannel
+     * we got from DiscordSRV). DiscordSRV's shaded jar relocates "net.dv8tion.jda" to
+     * "github.scarsz.discordsrv.dependencies.jda", so hardcoding "net.dv8tion.jda" breaks.
+     * Falls back to the unshaded "net.dv8tion.jda" if no ".jda." segment is found.
+     */
+    private static String detectJdaBasePackage(Class<?> jdaObjectClass) {
+        String name = jdaObjectClass.getName();
+        int idx = name.indexOf(".jda.");
+        if (idx >= 0) {
+            return name.substring(0, idx + 4); // include trailing ".jda"
+        }
+        return "net.dv8tion.jda";
+    }
+
+    /**
      * Attaches PNG files to a MessageCreateAction via reflection (JDA's FileUpload API).
      * Always returns a non-null action: if attaching fails for any reason, the ORIGINAL
      * action is returned (so the text message still sends) but the failure is logged so
      * it's actually visible instead of silently dropping the images.
      */
-    private static Object attachImages(Plugin plugin, ClassLoader jdaClassLoader, Object action, List<File> images) {
+    private static Object attachImages(Plugin plugin, ClassLoader jdaClassLoader, String jdaBasePackage,
+                                        Object action, List<File> images) {
         try {
             Class<?> fileUploadClass = Class.forName(
-                    "net.dv8tion.jda.api.utils.FileUpload", true, jdaClassLoader);
+                    jdaBasePackage + ".api.utils.FileUpload", true, jdaClassLoader);
             Method fromDataMethod = fileUploadClass.getMethod("fromData", File.class, String.class);
 
             Object array = Array.newInstance(fileUploadClass, images.size());
@@ -117,8 +134,8 @@ public class DiscordHook {
             Object result = addFilesMethod.invoke(action, new Object[]{array});
             return result != null ? result : action;
         } catch (ClassNotFoundException e) {
-            plugin.getLogger().warning("JDA's FileUpload class not found on classpath - "
-                    + "images will NOT be sent to Discord: " + e);
+            plugin.getLogger().warning("JDA's FileUpload class not found (looked for "
+                    + jdaBasePackage + ".api.utils.FileUpload) - images will NOT be sent to Discord: " + e);
             return action;
         } catch (Throwable t) {
             plugin.getLogger().warning("Failed to attach images to Discord message "
