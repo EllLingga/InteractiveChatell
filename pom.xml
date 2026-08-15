@@ -43,8 +43,8 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- DiscordSRV -- only needed at compile time, the real plugin jar
-             the user already has installed on their server is used at runtime -->
+        <!-- DiscordSRV: only needed at compile time, the real plugin jar
+     the user already has installed on their server is used at runtime -->
         <dependency>
             <groupId>com.github.DiscordSRV</groupId>
             <artifactId>DiscordSRV</artifactId>
