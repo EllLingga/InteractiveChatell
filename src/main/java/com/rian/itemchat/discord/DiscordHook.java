@@ -65,7 +65,11 @@ public class DiscordHook {
             if (action == null) return;
 
             if (images != null && !images.isEmpty()) {
-                action = attachImages(plugin, action, images);
+                // Use the channel object's OWN classloader to resolve JDA classes, not
+                // ItemChat's classloader - DiscordSRV loads JDA via its own library loader,
+                // so JDA classes are only visible through that classloader, not through
+                // Bukkit's normal inter-plugin class lookup.
+                action = attachImages(plugin, channel.getClass().getClassLoader(), action, images);
             }
 
             Method queueMethod = action.getClass().getMethod("queue");
@@ -83,9 +87,10 @@ public class DiscordHook {
      * action is returned (so the text message still sends) but the failure is logged so
      * it's actually visible instead of silently dropping the images.
      */
-    private static Object attachImages(Plugin plugin, Object action, List<File> images) {
+    private static Object attachImages(Plugin plugin, ClassLoader jdaClassLoader, Object action, List<File> images) {
         try {
-            Class<?> fileUploadClass = Class.forName("net.dv8tion.jda.api.utils.FileUpload");
+            Class<?> fileUploadClass = Class.forName(
+                    "net.dv8tion.jda.api.utils.FileUpload", true, jdaClassLoader);
             Method fromDataMethod = fileUploadClass.getMethod("fromData", File.class, String.class);
 
             Object array = Array.newInstance(fileUploadClass, images.size());
