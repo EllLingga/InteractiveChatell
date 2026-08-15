@@ -97,8 +97,9 @@ public class DiscordHook {
      * Attaches PNG files to the Discord message action, trying BOTH JDA API shapes since
      * different JDA versions (and DiscordSRV's bundled version specifically) differ here:
      *  - JDA 5+: FileUpload.fromData(...) + action.addFiles(FileUpload...)
-     *  - JDA 4.x (what DiscordSRV currently bundles): action.addFile(File, String) directly,
-     *    called once per file, each call returning the (mutated) action to chain off of.
+     *  - JDA 4.x (what DiscordSRV currently bundles): action.addFile(File, String, AttachmentOption...)
+     *    called once per file - note the trailing varargs, which compiles to a 3rd array
+     *    parameter, so a plain 2-arg (File, String) lookup never matches the real method.
      * Always returns a non-null action: if BOTH attempts fail, the ORIGINAL action is
      * returned (so the text message still sends), and the failure is logged so it's
      * actually visible instead of silently dropping the images.
@@ -109,12 +110,12 @@ public class DiscordHook {
         Object viaFileUpload = tryAttachViaFileUpload(jdaClassLoader, jdaBasePackage, action, images);
         if (viaFileUpload != null) return viaFileUpload;
 
-        Object viaAddFile = tryAttachViaLegacyAddFile(action, images);
+        Object viaAddFile = tryAttachViaLegacyAddFile(jdaClassLoader, jdaBasePackage, action, images);
         if (viaAddFile != null) return viaAddFile;
 
         plugin.getLogger().warning("Could not attach images to the Discord message - tried both the "
-                + "JDA5 FileUpload API and the legacy JDA4 addFile(File, String) API and neither worked "
-                + "against " + action.getClass() + ". Only text will be sent to Discord.");
+                + "JDA5 FileUpload API and the legacy JDA4 addFile(File, String, AttachmentOption...) "
+                + "API and neither worked against " + action.getClass() + ". Only text will be sent to Discord.");
         return action;
     }
 
@@ -147,18 +148,30 @@ public class DiscordHook {
         }
     }
 
-    /** JDA 4.x style (what DiscordSRV currently bundles): action.addFile(File, String) once per image. Returns null on any failure. */
-    private static Object tryAttachViaLegacyAddFile(Object action, List<File> images) {
+    /**
+     * JDA 4.x style (what DiscordSRV currently bundles): action.addFile(File, String, AttachmentOption...)
+     * once per image. The trailing varargs is a real array parameter at the bytecode level, so we
+     * build an empty AttachmentOption[] (no spoiler/etc options needed) and pass that as the 3rd arg.
+     * Returns null on any failure so the caller knows to fall back further (or give up and log).
+     */
+    private static Object tryAttachViaLegacyAddFile(ClassLoader jdaClassLoader, String jdaBasePackage,
+                                                      Object action, List<File> images) {
         try {
+            Class<?> attachmentOptionClass = Class.forName(
+                    jdaBasePackage + ".api.utils.AttachmentOption", true, jdaClassLoader);
+            Object emptyOptions = Array.newInstance(attachmentOptionClass, 0);
+
             Object current = action;
             for (File file : images) {
-                Method addFileMethod = findPublicInterfaceMethod(current.getClass(), "addFile", File.class, String.class);
+                Method addFileMethod = findPublicInterfaceMethod(
+                        current.getClass(), "addFile", File.class, String.class, emptyOptions.getClass());
                 if (addFileMethod == null) {
-                    addFileMethod = findMethod(current.getClass(), "addFile", File.class, String.class);
+                    addFileMethod = findMethod(
+                            current.getClass(), "addFile", File.class, String.class, emptyOptions.getClass());
                 }
                 if (addFileMethod == null) return null; // this API shape isn't available either
                 addFileMethod.setAccessible(true);
-                Object result = addFileMethod.invoke(current, file, file.getName());
+                Object result = addFileMethod.invoke(current, file, file.getName(), emptyOptions);
                 if (result != null) current = result;
             }
             return current;
