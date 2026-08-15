@@ -2,6 +2,9 @@ package com.rian.itemchat;
 
 import com.rian.itemchat.discord.DiscordHook;
 import com.rian.itemchat.model.PreviewData;
+import com.rian.itemchat.render.InventoryImageRenderer;
+import com.rian.itemchat.render.ItemImageRenderer;
+import com.rian.itemchat.render.TextureCache;
 import net.md_5.bungee.api.ChatColor;
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -22,6 +25,8 @@ import org.bukkit.plugin.Plugin;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.io.File;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,10 +38,20 @@ public class ChatTagListener implements Listener {
 
     private final Plugin plugin;
     private final PreviewStore store;
+    private final ItemImageRenderer itemImageRenderer;
+    private final InventoryImageRenderer inventoryImageRenderer;
+    private final File imageCacheDir;
 
     public ChatTagListener(Plugin plugin, PreviewStore store) {
         this.plugin = plugin;
         this.store = store;
+        TextureCache textureCache = new TextureCache(plugin, "1.20.4");
+        this.itemImageRenderer = new ItemImageRenderer(textureCache);
+        this.inventoryImageRenderer = new InventoryImageRenderer(textureCache);
+        this.imageCacheDir = new File(plugin.getDataFolder(), "previews");
+        if (!imageCacheDir.exists()) {
+            imageCacheDir.mkdirs();
+        }
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -58,6 +73,7 @@ public class ChatTagListener implements Listener {
 
         ComponentBuilder builder = new ComponentBuilder("");
         StringBuilder plainForDiscord = new StringBuilder();
+        List<File> discordImages = new ArrayList<>();
         int lastEnd = 0;
 
         while (matcher.find()) {
@@ -75,6 +91,7 @@ public class ChatTagListener implements Listener {
                     BaseComponent comp = buildItemComponent(player, hand);
                     builder.append(comp.duplicate(), ComponentBuilder.FormatRetention.NONE);
                     plainForDiscord.append("[").append(itemName(hand)).append("]");
+                    tryRenderItemImage(hand, discordImages);
                     break;
                 }
                 case "[inv]": {
@@ -82,6 +99,7 @@ public class ChatTagListener implements Listener {
                     BaseComponent comp = buildInventoryComponent(player, contents);
                     builder.append(comp.duplicate(), ComponentBuilder.FormatRetention.NONE);
                     plainForDiscord.append("[Inventory]");
+                    tryRenderInventoryImage(contents, discordImages);
                     break;
                 }
                 case "[pos]": {
@@ -115,7 +133,40 @@ public class ChatTagListener implements Listener {
         plugin.getServer().getConsoleSender().spigot().sendMessage(finalMessage);
 
         // Relay to Discord if the hook is active
-        DiscordHook.relayIfPresent(plugin, player, plainForDiscord.toString(), message);
+        DiscordHook.relayIfPresent(plugin, player, plainForDiscord.toString(), discordImages);
+    }
+
+    private void tryRenderItemImage(ItemStack item, List<File> out) {
+        if (item == null || item.getType() == Material.AIR) return;
+        try {
+            File file = new File(imageCacheDir, "item_" + UUID.randomUUID() + ".png");
+            itemImageRenderer.render(item, file);
+            out.add(file);
+        } catch (Exception e) {
+            plugin.getLogger().warning("Failed to render item image: " + e.getMessage());
+        }
+    }
+
+    private void tryRenderInventoryImage(ItemStack[] contents, List<File> out) {
+        try {
+            File file = new File(imageCacheDir, "inv_" + UUID.randomUUID() + ".png");
+            inventoryImageRenderer.render(contents, file);
+            out.add(file);
+        } catch (Exception e) {
+            plugin.getLogger().warning("Failed to render inventory image: " + e.getMessage());
+        }
+    }
+
+    /** Deletes rendered preview images older than 10 minutes. Call this periodically. */
+    public void cleanupOldImages() {
+        File[] files = imageCacheDir.listFiles();
+        if (files == null) return;
+        long cutoff = System.currentTimeMillis() - (10 * 60 * 1000L);
+        for (File file : files) {
+            if (file.lastModified() < cutoff) {
+                file.delete();
+            }
+        }
     }
 
     private BaseComponent buildItemComponent(Player owner, ItemStack item) {
