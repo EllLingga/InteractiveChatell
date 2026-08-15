@@ -173,4 +173,6 @@ public class TextureCache {
             g.fillRect(0, 8, 8, 8);
             g.dispose();
         }
-        re
+        return missingTexture;
+    }
+}
